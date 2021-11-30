@@ -5,6 +5,7 @@ Copyright 2012-2019 eBay Inc.
 Authored by: Tim Keefer
 Licensed under CDDL 1.0
 '''
+import logging
 
 from ebaysdk import log
 
@@ -25,11 +26,66 @@ from ebaysdk.utils import getValue, smart_encode_request_data
 from ebaysdk.response import Response
 from ebaysdk.exception import ConnectionError, ConnectionResponseError
 
+import requests, base64
+from requests.structures import CaseInsensitiveDict
+import json
+import datetime
+from datetime import datetime
+
+
 HTTP_SSL = {
     False: 'http',
     True: 'https',
 }
 
+class TokenManager():
+
+    URL_SANDBOX = "https://api.sandbox.ebay.com/identity/v1/oauth2/token"
+    URL_PRODUCTION = "https://api.ebay.com/identity/v1/oauth2/token"
+    TOKEN_TTL_SECS = 60 * 60
+
+    def __init__(self, client_id, client_secret):
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.logger = logging.getLogger(name='EbayTokenManager')
+
+        self.__current_token = None
+        self.__date_token_fetched = None
+
+    def get_token(self):
+        if not self.__current_token or self.is_expired():
+            self.logger.info('Getting api token from ebay ....')
+            self.__current_token = self._send_request()
+            self.__date_token_fetched = datetime.now()
+            self.logger.info('...token retreived!')
+            return self.__current_token
+        else:
+            return self.__current_token
+
+    def is_expired(self):
+        diff = datetime.now() - self.__date_token_fetched
+        expired = diff.seconds >= self.TOKEN_TTL_SECS
+        return expired
+
+    def _send_request(self):
+        '''
+        @see https://github.com/timotheus/ebaysdk-python/issues/347
+        '''
+        url = self.URL_PRODUCTION
+
+        credentials = f"{self.client_id}:{self.client_secret}"
+        credentials_bytes = credentials.encode('ascii')
+        base64_bytes = base64.b64encode(credentials_bytes)
+        credentials_b64 = base64_bytes.decode('ascii')
+
+        headers = CaseInsensitiveDict()
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+        headers["Authorization"] = f"Basic {credentials_b64}"
+        data = "grant_type=client_credentials&scope=https%3A%2F%2Fapi.ebay.com%2Foauth%2Fapi_scope"
+        response = requests.post(url, headers=headers, data=data)
+        response_dict = response.json()
+        access_token = response_dict['access_token']
+        return access_token
 
 class BaseConnection(object):
     """Base Connection Class."""
@@ -37,6 +93,16 @@ class BaseConnection(object):
     def __init__(self, debug=False, method='GET',
                  proxy_host=None, timeout=20, proxy_port=80,
                  parallel=None, escape_xml=False, **kwargs):
+
+        # retreive mandatory client_id and client_secret
+        kwargs = kwargs or {}
+        client_id = kwargs.get('client_id')
+        client_secret = kwargs.get('client_secret')
+
+        if not client_id or not client_secret:
+            raise ValueError('<client_id> and <client_secret> must be provided for API access')
+
+        self.token_manager = TokenManager(client_id=client_id , client_secret=client_secret)
 
         if debug:
             set_stream_logger()
@@ -142,6 +208,9 @@ class BaseConnection(object):
         headers.update({'User-Agent': UserAgent,
                         'X-EBAY-SDK-REQUEST-ID': str(self._request_id)})
 
+        token = self.token_manager.get_token()
+        headers.update({'X-EBAY-API-IAF-TOKEN':token})
+
         # if we are adding files, we ensure there is no Content-Type header already defined
         # otherwise Request will use the existing one which is likely not to be multipart/form-data
         # data must also be a dict so we make it so if needed
@@ -246,7 +315,7 @@ class BaseConnection(object):
                 from bs4 import BeautifulStoneSoup
             except ImportError:
                 from BeautifulSoup import BeautifulStoneSoup
-                log.warning(
+                log.warn(
                     'DeprecationWarning: BeautifulSoup 3 or earlier is deprecated; install bs4 instead\n')
 
             self._response_soup = BeautifulStoneSoup(
@@ -256,14 +325,14 @@ class BaseConnection(object):
         return self._response_soup
 
     def response_obj(self):
-        log.warning('response_obj() DEPRECATED, use response.reply instead')
+        log.warn('response_obj() DEPRECATED, use response.reply instead')
         return self.response.reply
 
     def response_dom(self):
         """ Deprecated: use self.response.dom() instead
         Returns the response DOM (xml.dom.minidom).
         """
-        log.warning('response_dom() DEPRECATED, use response.dom instead')
+        log.warn('response_dom() DEPRECATED, use response.dom instead')
 
         if not self._response_dom:
             dom = None
@@ -291,14 +360,14 @@ class BaseConnection(object):
 
     def response_dict(self):
         "Returns the response dictionary."
-        log.warning(
+        log.warn(
             'response_dict() DEPRECATED, use response.dict() or response.reply instead')
 
         return self.response.reply
 
     def response_json(self):
         "Returns the response JSON."
-        log.warning('response_json() DEPRECATED, use response.json() instead')
+        log.warn('response_json() DEPRECATED, use response.json() instead')
 
         return self.response.json()
 
